@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, is_dataclass, asdict, field
 from typing import Dict, Tuple, Mapping, List, Union, Protocol, Any
 
@@ -118,6 +119,7 @@ class Box(AttrObject):
 
     coordinates: Coordinates
     output_scale: int = 6
+    container_size: Size = None
 
     def __init__(
         self,
@@ -149,6 +151,27 @@ class Box(AttrObject):
                     _case_insensitive_pop(value, "top"),
                     _case_insensitive_pop(value, "width"),
                     _case_insensitive_pop(value, "height"),
+                )
+
+            rel_coord = _case_insensitive_pop(
+                value, "rel_coordinates", raise_if_missing=False
+            )
+            if not rel_coord:
+                rel_coord = _case_insensitive_pop(
+                    value, "relative_coordinates", raise_if_missing=False
+                )
+            if rel_coord:
+                c_pair = zip(self.coordinates, rel_coord)
+                dim_pair = [
+                    (i, c[0] / c[1])
+                    for i, c in enumerate(c_pair)
+                    if c[0] > 0 and c[1] > 0
+                ]
+                w_vals = [c for i, c in dim_pair if i in [0, 2]]
+                h_vals = [c for i, c in dim_pair if i in [1, 3]]
+                self.container_size = (
+                    sum(w_vals) / len(w_vals),
+                    sum(h_vals) / len(h_vals),
                 )
 
             # Get any remaining attributes on the value that aren't associated with location or serialization
@@ -192,6 +215,13 @@ class Box(AttrObject):
     @property
     def height(self) -> Number:
         return self.coordinates[3] - self.coordinates[1]
+
+    @property
+    def center(self) -> (Number, Number):
+        return (
+            (self.coordinates[2] - self.coordinates[0]) / 2 + self.coordinates[0],
+            (self.coordinates[3] - self.coordinates[1]) / 2 + self.coordinates[1],
+        )
 
     @property
     def bottom(self) -> Number:
@@ -265,7 +295,7 @@ class Box(AttrObject):
         )
         if kwargs:
             p.update(kwargs)
-        return cls(coordinates, p)
+        return cls(coordinates, p, container_size=(width, height))
 
     @staticmethod
     def __normalize_bottom_origin(
@@ -376,7 +406,10 @@ class Box(AttrObject):
         if isinstance(other, list) or isinstance(other, tuple):
             if len(other) == 4:
                 pairs = list(zip(self.coordinates, other))
-                return Box([min(pairs[0]), min(pairs[1]), max(pairs[2]), max(pairs[3])])
+                return Box(
+                    [min(pairs[0]), min(pairs[1]), max(pairs[2]), max(pairs[3])],
+                    self.attributes,
+                )
             elif len(other) == 2:
                 c = self.coordinates
                 x = other[0]
@@ -406,6 +439,47 @@ class Box(AttrObject):
 
     def __radd__(self, other):
         return self.copy(True) if other == 0 else self + other
+
+    def scale(self, scale: float | int) -> "Box":
+        width = self.width * math.sqrt(scale)
+        height = self.height * math.sqrt(scale)
+        w2 = width / 2
+        h2 = height / 2
+        coords = [
+            max(self.center[0] - w2, 0),
+            max(self.center[1] - h2, 0),
+            (
+                min(self.center[0] + w2, self.container_size[0])
+                if self.container_size
+                else self.center[0] + w2
+            ),
+            (
+                min(self.center[1] + h2, self.container_size[1])
+                if self.container_size
+                else self.center[1] + h2
+            ),
+        ]
+        return Box(coords, self.attributes)
+
+    def offset(self, x: Number = 0, y: Number = 0) -> "Box":
+        """
+        Offset the position of the box as a percentage of the image dimensions.
+        Can only be used if the `container_size` attribute is set.
+        :param x: Horizontal offset of the box, a value of 0 will result in no change
+        :param y: Vertical offset of the box, a value of 0 will result in no change
+        :return: A Box object
+        """
+        if self.container_size is None:
+            raise Exception("Container size must be set to perform a percentage offset")
+        xx = self.container_size[0] * (1 + x) - self.container_size[0]
+        yy = self.container_size[1] * (1 + y) - self.container_size[1]
+        coords = [
+            max(self.coordinates[0] + xx, 0),
+            max(self.coordinates[1] + yy, 0),
+            min(self.coordinates[2] + xx, self.container_size[0]),
+            min(self.coordinates[3] + yy, self.container_size[1]),
+        ]
+        return Box(coords, self.attributes)
 
     def intersecting_boxes(self, boxes, min_overlap=0):
         return [
